@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState, useCallback } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { useSessionStore } from '@/store/sessionStore';
 import { CAMERA_CONFIG, TIMINGS } from '@/lib/config';
 
@@ -10,98 +10,132 @@ export const useCamera = (videoRef: React.RefObject<HTMLVideoElement>) => {
   
   const { setCameraReady, setError: setGlobalError } = useSessionStore();
 
-  const stopCamera = useCallback(() => {
-    if (streamRef.current) {
-      streamRef.current.getTracks().forEach((track) => track.stop());
-      streamRef.current = null;
-    }
-    if (videoRef.current) {
-      videoRef.current.srcObject = null;
-    }
-  }, []);
-
-  const startCamera = useCallback(async () => {
-    try {
-      setIsLoading(true);
-      setError(null);
-      setGlobalError(null);
-
-      // Stop existing stream
-      stopCamera();
-
-      // Request camera access
-      const stream = await navigator.mediaDevices.getUserMedia({
-        video: {
-          facingMode: CAMERA_CONFIG.facingMode,
-          width: CAMERA_CONFIG.width,
-          height: CAMERA_CONFIG.height,
-          frameRate: CAMERA_CONFIG.frameRate,
-        },
-        audio: false,
-      });
-
-      streamRef.current = stream;
-
-      if (videoRef.current) {
-        videoRef.current.srcObject = stream;
-        
-        // Wait for video to be ready
-        await new Promise<void>((resolve) => {
-          if (videoRef.current) {
-            videoRef.current.onloadedmetadata = () => {
-              videoRef.current?.play();
-              resolve();
-            };
-          }
-        });
-
-        setCameraReady(true);
-        setIsLoading(false);
-      }
-    } catch (err) {
-      const errorMessage = err instanceof Error ? err.message : 'Failed to access camera';
-      setError(errorMessage);
-      setGlobalError(errorMessage);
-      setCameraReady(false);
-      setIsLoading(false);
-
-      // Retry after delay
-      retryTimeoutRef.current = setTimeout(() => {
-        startCamera();
-      }, TIMINGS.cameraRetryDelay);
-    }
-  }, [setCameraReady, setGlobalError, stopCamera]);
-
   useEffect(() => {
-    startCamera();
+    let mounted = true;
 
-    return () => {
-      stopCamera();
-      if (retryTimeoutRef.current) {
-        clearTimeout(retryTimeoutRef.current);
+    const stopCamera = () => {
+      if (streamRef.current) {
+        streamRef.current.getTracks().forEach((track) => track.stop());
+        streamRef.current = null;
+      }
+      if (videoRef.current) {
+        videoRef.current.srcObject = null;
       }
     };
-  }, [startCamera, stopCamera]);
 
-  // Monitor stream health
-  useEffect(() => {
-    const checkStream = () => {
-      if (streamRef.current) {
-        const videoTrack = streamRef.current.getVideoTracks()[0];
-        if (!videoTrack || videoTrack.readyState === 'ended') {
-          console.warn('Camera stream ended, restarting...');
-          startCamera();
+    const startCamera = async () => {
+      try {
+        if (!mounted) return;
+        
+        setIsLoading(true);
+        setError(null);
+        setGlobalError(null);
+
+        // Stop existing stream
+        stopCamera();
+
+        // Request camera access
+        const stream = await navigator.mediaDevices.getUserMedia({
+          video: {
+            facingMode: CAMERA_CONFIG.facingMode,
+            width: CAMERA_CONFIG.width,
+            height: CAMERA_CONFIG.height,
+            frameRate: CAMERA_CONFIG.frameRate,
+          },
+          audio: false,
+        });
+
+        if (!mounted) {
+          // Component unmounted, stop the stream
+          stream.getTracks().forEach((track) => track.stop());
+          return;
+        }
+
+        streamRef.current = stream;
+
+        if (videoRef.current) {
+          const video = videoRef.current;
+          video.srcObject = stream;
+          
+          // Wait for video to be ready
+          await new Promise<void>((resolve, reject) => {
+            const onLoadedMetadata = () => {
+              video.play()
+                .then(() => resolve())
+                .catch(reject);
+              cleanup();
+            };
+            
+            const onError = () => {
+              reject(new Error('Video failed to load'));
+              cleanup();
+            };
+            
+            const cleanup = () => {
+              video.removeEventListener('loadedmetadata', onLoadedMetadata);
+              video.removeEventListener('error', onError);
+            };
+            
+            video.addEventListener('loadedmetadata', onLoadedMetadata);
+            video.addEventListener('error', onError);
+            
+            // If metadata is already loaded, trigger immediately
+            if (video.readyState >= 1) {
+              onLoadedMetadata();
+            }
+          });
+
+          if (mounted) {
+            setCameraReady(true);
+            setIsLoading(false);
+          }
+        }
+      } catch (err) {
+        if (!mounted) return;
+        
+        const errorMessage = err instanceof Error ? err.message : 'Failed to access camera';
+        console.error('Camera error:', errorMessage);
+        setError(errorMessage);
+        setGlobalError(errorMessage);
+        setCameraReady(false);
+        setIsLoading(false);
+
+        // Retry after delay
+        if (mounted) {
+          retryTimeoutRef.current = window.setTimeout(() => {
+            if (mounted) startCamera();
+          }, TIMINGS.cameraRetryDelay);
         }
       }
     };
 
-    const interval = setInterval(checkStream, 5000);
-    return () => clearInterval(interval);
-  }, [startCamera]);
+    startCamera();
+
+    return () => {
+      mounted = false;
+      stopCamera();
+      if (retryTimeoutRef.current !== null) {
+        window.clearTimeout(retryTimeoutRef.current);
+        retryTimeoutRef.current = null;
+      }
+    };
+  }, [videoRef, setCameraReady, setGlobalError]);
+
+  // Expose retry function
+  const retryCamera = () => {
+    setIsLoading(true);
+    setError(null);
+    // Trigger re-mount by clearing and setting the video source
+    if (videoRef.current) {
+      videoRef.current.srcObject = null;
+    }
+    // The effect will restart the camera
+    window.location.reload();
+  };
 
   return {
     isLoading,
     error,
-    retryCamera: startCamera,
+    retryCamera,
   };
 };

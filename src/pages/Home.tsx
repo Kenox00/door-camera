@@ -11,7 +11,7 @@ import { useSessionStore } from '@/store/sessionStore';
 export const Home: React.FC = () => {
   const navigate = useNavigate();
   const videoRef = useRef<HTMLVideoElement>(null);
-  useCamera(videoRef); // Pass ref to camera hook
+  // Remove duplicate useCamera call - CameraView handles it
   const { capturePhoto, isCapturing } = useCapture(videoRef);
   const { cameraReady } = useSessionStore();
 
